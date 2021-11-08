@@ -256,7 +256,8 @@ def kill_processes(processes):
             if not kill_proc:
                 continue
 
-            log.debug('Child process name %d %r %r %r', p.pid, p.name(), p.exe(), p.cmdline())
+            log.debug('Child process name %d %r %r', p.pid, p.name(), p.cmdline())
+            # log.debug('Child process name %d %r %r %r', p.pid, p.name(), p.exe(), p.cmdline())
             if p.is_running():
                 log.debug('Killing process %s...', p.name())
                 p.kill()
@@ -289,7 +290,6 @@ def cores_for_worker_process(worker_idx, num_workers, cpu_count):
         if cpu_count % remaining_workers == 0:
             cores_to_use = cpu_count // remaining_workers
             cores = list(range(worker_idx_modulo * cores_to_use, (worker_idx_modulo + 1) * cores_to_use, 1))
-
     return cores
 
 

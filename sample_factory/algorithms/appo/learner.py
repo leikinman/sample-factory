@@ -221,7 +221,7 @@ class LearnerWorker:
         self.policy_lock = policy_lock
         self.resume_experience_collection_cv = resume_experience_collection_cv
 
-        self.task_queue = MpQueue()
+        self.task_queue = MpQueue(name='learner_worker_task_queue_{}'.format(worker_idx))
         self.report_queue = report_queue
 
         self.initialized_event = MultiprocessingEvent()
@@ -1317,3 +1317,4 @@ class LearnerWorker:
 
     def join(self):
         join_or_kill(self.process)
+        self.task_queue.close()

@@ -11,6 +11,7 @@ from sample_factory.algorithms.appo.appo_utils import copy_dict_structure, iter_
 from sample_factory.algorithms.appo.model_utils import get_hidden_size
 from sample_factory.algorithms.utils.action_distributions import calc_num_logits, calc_num_actions
 from sample_factory.utils.utils import log
+from sample_factory.utils.shared_memory import SharedMemory
 
 
 def to_torch_dtype(numpy_dtype):
@@ -50,11 +51,12 @@ class PolicyOutput:
 
 
 class SharedBuffers:
-    def __init__(self, cfg, num_agents, obs_space, action_space):
+    def __init__(self, cfg, num_agents, obs_space, action_space, create=True):
         self.cfg = cfg
         self.num_agents = num_agents
         self.envs_per_split = cfg.num_envs_per_worker // cfg.worker_num_splits
         self.num_traj_buffers = self.calc_num_trajectory_buffers()
+        self.create = create
 
         num_actions = calc_num_actions(action_space)
         num_action_logits = calc_num_logits(action_space)
@@ -62,6 +64,8 @@ class SharedBuffers:
         hidden_size = get_hidden_size(self.cfg)
 
         log.debug('Allocating shared memory for trajectories')
+        self._shm_dict = {}
+        self._shm_alloc_inc = 0
         self._tensors = TensorDict()
 
         # policy inputs
@@ -69,17 +73,18 @@ class SharedBuffers:
         self._tensors['obs'] = obs_dict
         if isinstance(obs_space, spaces.Dict):
             for space_name, space in obs_space.spaces.items():
-                obs_dict[space_name] = self.init_tensor(space.dtype, space.shape)
+                obs_dict[space_name] = self.init_shared_tensor(space.dtype, space.shape)
         else:
             raise Exception('Only Dict observations spaces are supported')
 
         # env outputs
-        self._tensors['rewards'] = self.init_tensor(torch.float32, [1])
-        self._tensors['rewards'].fill_(-42.42)  # if we're using uninitialized values it will be obvious
-        self._tensors['dones'] = self.init_tensor(torch.bool, [1])
-        self._tensors['dones'].fill_(True)
-        self._tensors['policy_id'] = self.init_tensor(torch.int, [1])
-        self._tensors['policy_id'].fill_(-1)  # -1 is an invalid policy index, experience from policy "-1" is always ignored
+        self._tensors['rewards'] = self.init_shared_tensor(np.float32, [1])
+        self._tensors['dones'] = self.init_shared_tensor(np.bool, [1])
+        self._tensors['policy_id'] = self.init_shared_tensor(np.int32, [1])
+        if create:
+            self._tensors['rewards'].fill(-42.42)  # if we're using uninitialized values it will be obvious
+            self._tensors['dones'].fill(True)
+            self._tensors['policy_id'].fill(-1)  # -1 is an invalid policy index, experience from policy "-1" is always ignored
 
         # policy outputs
         policy_outputs = [
@@ -95,13 +100,13 @@ class SharedBuffers:
         policy_outputs = sorted(policy_outputs, key=lambda policy_output: policy_output.name)
 
         for po in policy_outputs:
-            self._tensors[po.name] = self.init_tensor(torch.float32, [po.size])
+            self._tensors[po.name] = self.init_shared_tensor(np.float32, [po.size])
 
-        ensure_memory_shared(self._tensors)
+        # ensure_memory_shared(self._tensors)
 
         # this is for performance optimization
         # indexing in numpy arrays is faster than in PyTorch tensors
-        self.tensors = self.tensor_dict_to_numpy()
+        self.tensors = self._tensors # self.tensor_dict_to_numpy()
 
         # copying small policy outputs (e.g. individual value predictions & action logits) to shared memory is a
         # bottleneck on the policy worker. For optimization purposes we create additional tensors to hold
@@ -109,7 +114,7 @@ class SharedBuffers:
         # in a proper format
         policy_outputs_combined_size = sum(po.size for po in policy_outputs)
         policy_outputs_shape = [
-            self.cfg.num_workers,
+            self.cfg.max_num_workers,
             self.cfg.worker_num_splits,
             self.envs_per_split,
             self.num_agents,
@@ -117,25 +122,34 @@ class SharedBuffers:
         ]
 
         self.policy_outputs = policy_outputs
-        self._policy_output_tensors = torch.zeros(policy_outputs_shape, dtype=torch.float32)
-        self._policy_output_tensors.share_memory_()
-        self.policy_output_tensors = self._policy_output_tensors.numpy()
+        # self._policy_output_tensors = torch.zeros(policy_outputs_shape, dtype=torch.float32)
+        # self._policy_output_tensors.share_memory_()
+        # self.policy_output_tensors = self._policy_output_tensors.numpy()
+        self._policy_output_tensors = self.init_shared_tensor(np.float32, policy_outputs_shape, with_dim=False)
+        self.policy_output_tensors = self._policy_output_tensors
 
-        self._policy_versions = torch.zeros([self.cfg.num_policies], dtype=torch.int32)
-        self._policy_versions.share_memory_()
-        self.policy_versions = self._policy_versions.numpy()
+        # self._policy_versions = torch.zeros([self.cfg.num_policies], dtype=torch.int32)
+        # self._policy_versions.share_memory_()
+        # self.policy_versions = self._policy_versions.numpy()
+        self._policy_versions = self.init_shared_tensor(np.int32, [self.cfg.num_policies], with_dim=False)
+        self.policy_versions = self._policy_versions
 
         # a list of boolean flags to be shared among components that indicate that experience collection should be
         # temporarily stopped (e.g. due to too much experience accumulated on the learner)
-        self._stop_experience_collection = torch.ones([self.cfg.num_policies], dtype=torch.bool)
-        self._stop_experience_collection.share_memory_()
-        self.stop_experience_collection = self._stop_experience_collection.numpy()
+        # self._stop_experience_collection = torch.ones([self.cfg.num_policies], dtype=torch.bool)
+        # self._stop_experience_collection.share_memory_()
+        # self.stop_experience_collection = self._stop_experience_collection.numpy()
+        self._stop_experience_collection = self.init_shared_tensor(np.bool, [self.cfg.num_policies], with_dim=False)
+        self.stop_experience_collection = self._stop_experience_collection
 
         queue_max_size_bytes = self.num_traj_buffers * 40  # 40 bytes to encode an int should be enough?
-        self.free_buffers_queue = faster_fifo.Queue(max_size_bytes=queue_max_size_bytes)
+        if self.create == True:
+            self.free_buffers_queue = faster_fifo.Queue(max_size_bytes=queue_max_size_bytes, name='free_buffer_queue', create=True)
+            # since all buffers are initially free, we add all buffer indices to the queue
+            self.free_buffers_queue.put_many_nowait([int(i) for i in np.arange(self.num_traj_buffers)])
+        else:
+            self.free_buffers_queue = faster_fifo.Queue(name='free_buffer_queue', create=False)
 
-        # since all buffers are initially free, we add all buffer indices to the queue
-        self.free_buffers_queue.put_many_nowait([int(i) for i in np.arange(self.num_traj_buffers)])
 
     def calc_num_trajectory_buffers(self):
         """
@@ -151,7 +165,7 @@ class SharedBuffers:
         """
 
         # Add a traj buffer for each agent
-        num_traj_buffers = (self.cfg.num_workers + 1) * self.cfg.num_envs_per_worker * self.num_agents
+        num_traj_buffers = (self.cfg.max_num_workers + 1) * self.cfg.num_envs_per_worker * self.num_agents
 
         max_minibatches_to_accumulate = self.cfg.num_minibatches_to_accumulate
         if max_minibatches_to_accumulate == -1:
@@ -164,12 +178,33 @@ class SharedBuffers:
 
         # Configurable excess ratio to be safe
         assert self.cfg.traj_buffers_excess_ratio >= 1.0
-        num_traj_buffers = self.cfg.traj_buffers_excess_ratio * num_traj_buffers
+        num_traj_buffers = 3.0 * num_traj_buffers
 
         num_traj_buffers = int(math.ceil(num_traj_buffers))
 
         log.info('Using a total of %d trajectory buffers', num_traj_buffers)
         return num_traj_buffers
+
+    def init_shared_tensor(self, tensor_type, tensor_shape, with_dim=True):
+        if not isinstance(tensor_type, np.dtype):
+            tensor_type = np.dtype(tensor_type)
+
+        name = "shared_buffers_{}".format(self._shm_alloc_inc)
+        dimensions = [self.num_traj_buffers, self.cfg.rollout]
+        final_shape = list(tensor_shape)
+        if with_dim:
+            final_shape = dimensions + final_shape
+        size = np.prod(final_shape)
+        if self.create:
+            _t = SharedMemory(name=name, create=True, size=size*tensor_type.itemsize)
+            t = np.ndarray(final_shape, dtype=tensor_type, buffer=_t.buf)
+            t.fill(0)
+        else:
+            _t = SharedMemory(name=name, create=False)
+            t = np.ndarray(final_shape, dtype=tensor_type, buffer=_t.buf)
+        self._shm_alloc_inc += 1
+        self._shm_dict[name] = _t
+        return t
 
     def init_tensor(self, tensor_type, tensor_shape):
         if not isinstance(tensor_type, torch.dtype):
@@ -220,6 +255,12 @@ class SharedBuffers:
             _int = int
             free_indices = [_int(i) for i in indices]
             self.free_buffers_queue.put_many_nowait(free_indices)
+    
+    def close(self):
+        for shm in self._shm_dict.values():
+            shm.close()
+            shm.unlink()
+        self.free_buffers_queue.close()
 
 
 class TensorDict(dict):

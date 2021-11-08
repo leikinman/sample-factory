@@ -19,6 +19,7 @@ import time
 from collections import deque
 from os.path import join
 from queue import Empty
+import signal
 
 import numpy as np
 import torch
@@ -27,6 +28,7 @@ from torch.multiprocessing import JoinableQueue as TorchJoinableQueue
 
 from sample_factory.algorithms.algorithm import ReinforcementLearningAlgorithm
 from sample_factory.algorithms.appo.actor_worker import ActorWorker
+from sample_factory.algorithms.appo.fake_actor_worker import FakeActorWorker
 from sample_factory.algorithms.appo.appo_utils import make_env_func, iterate_recursively, set_global_cuda_envvars
 from sample_factory.algorithms.appo.learner import LearnerWorker
 from sample_factory.algorithms.appo.policy_worker import PolicyWorker
@@ -81,6 +83,9 @@ class APPO(ReinforcementLearningAlgorithm):
         )
 
         p.add_argument('--num_workers', default=multiprocessing.cpu_count(), type=int, help='Number of parallel environment workers. Should be less than num_envs and should divide num_envs')
+        p.add_argument('--max_num_workers', default=multiprocessing.cpu_count(), type=int, help='The MAX number of parallel environment workers. Should be less than num_envs and should divide num_envs')
+
+        p.add_argument('--stop_value', default=None, type=int, help='The stop value of reward.')
 
         p.add_argument(
             '--recurrence', default=32, type=int,
@@ -243,6 +248,11 @@ class APPO(ReinforcementLearningAlgorithm):
         self.obs_space = tmp_env.observation_space
         self.action_space = tmp_env.action_space
         self.num_agents = tmp_env.num_agents
+        self.num_workers = self.cfg.num_workers
+
+        # For stop experiment
+        self.stop_value = self.cfg.stop_value
+        self.cur_policy_reward = None
 
         self.reward_shaping_scheme = None
         if self.cfg.with_pbt:
@@ -255,7 +265,7 @@ class APPO(ReinforcementLearningAlgorithm):
 
         self.actor_workers = None
 
-        self.report_queue = MpQueue(40 * 1000 * 1000)
+        self.report_queue = MpQueue(40 * 1000 * 1000, name="report_queue")
         self.policy_workers = dict()
         self.policy_queues = dict()
 
@@ -264,10 +274,10 @@ class APPO(ReinforcementLearningAlgorithm):
         self.workers_by_handle = None
 
         self.policy_inputs = [[] for _ in range(self.cfg.num_policies)]
-        self.policy_outputs = dict()
-        for worker_idx in range(self.cfg.num_workers):
-            for split_idx in range(self.cfg.worker_num_splits):
-                self.policy_outputs[(worker_idx, split_idx)] = dict()
+        # self.policy_outputs = dict()
+        # for worker_idx in range(self.cfg.num_workers):
+        #     for split_idx in range(self.cfg.worker_num_splits):
+        #         self.policy_outputs[(worker_idx, split_idx)] = dict()
 
         self.policy_avg_stats = dict()
         self.policy_lag = [dict() for _ in range(self.cfg.num_policies)]
@@ -322,10 +332,19 @@ class APPO(ReinforcementLearningAlgorithm):
     def finalize(self):
         pass
 
+    # def create_actor_worker(self, idx, actor_queue):
+    #     learner_queues = {p: w.task_queue for p, w in self.learner_workers.items()}
+
+    #     return ActorWorker(
+    #         self.cfg, self.obs_space, self.action_space, self.num_agents, idx, self.traj_buffers,
+    #         task_queue=actor_queue, policy_queues=self.policy_queues,
+    #         report_queue=self.report_queue, learner_queues=learner_queues,
+    #     )
+
     def create_actor_worker(self, idx, actor_queue):
         learner_queues = {p: w.task_queue for p, w in self.learner_workers.items()}
 
-        return ActorWorker(
+        return FakeActorWorker(
             self.cfg, self.obs_space, self.action_space, self.num_agents, idx, self.traj_buffers,
             task_queue=actor_queue, policy_queues=self.policy_queues,
             report_queue=self.report_queue, learner_queues=learner_queues,
@@ -355,8 +374,8 @@ class APPO(ReinforcementLearningAlgorithm):
             workers[i] = w
             last_env_initialized[i] = time.time()
 
-        total_num_envs = self.cfg.num_workers * self.cfg.num_envs_per_worker
-        envs_initialized = [0] * self.cfg.num_workers
+        total_num_envs = len(indices) * self.cfg.num_envs_per_worker
+        envs_initialized = [0] * self.num_workers
         workers_finished = set()
 
         while len(workers_finished) < len(workers):
@@ -370,7 +389,7 @@ class APPO(ReinforcementLearningAlgorithm):
                     last_env_initialized[worker_idx] = time.time()
                     envs_initialized[worker_idx] += 1
 
-                    log.debug(
+                    log.info(
                         'Progress for %d workers: %d/%d envs initialized...',
                         len(indices), sum(envs_initialized), total_num_envs,
                     )
@@ -388,13 +407,13 @@ class APPO(ReinforcementLearningAlgorithm):
                 time_passed = time.time() - last_env_initialized[worker_idx]
                 timeout = time_passed > reset_timelimit_seconds
 
-                if timeout or failed_worker == worker_idx or not w.process.is_alive():
+                if timeout or failed_worker == worker_idx or not w.process_is_alive():
                     envs_initialized[worker_idx] = 0
 
                     log.error('Worker %d is stuck or failed (%.3f). Reset!', w.worker_idx, time_passed)
-                    log.debug('Status: %r', w.process.is_alive())
+                    log.debug('Status: %r', w.process_is_alive())
                     stuck_worker = w
-                    stuck_worker.process.kill()
+                    stuck_worker.kill()
 
                     new_worker = self.create_actor_worker(worker_idx, actor_queues[worker_idx])
                     new_worker.init()
@@ -411,8 +430,10 @@ class APPO(ReinforcementLearningAlgorithm):
         """
         Initialize all types of workers and start their worker processes.
         """
-
-        actor_queues = [MpQueue(2 * 1000 * 1000) for _ in range(self.cfg.num_workers)]
+        actor_queues = []
+        for i in range(self.cfg.num_workers):
+            actor_queues.append(MpQueue(2 * 1000 * 1000, name='actor_queue_{}'.format(i)) )
+        self.actor_queues = actor_queues
 
         policy_worker_queues = dict()
         for policy_id in range(self.cfg.num_policies):
@@ -441,7 +462,7 @@ class APPO(ReinforcementLearningAlgorithm):
         for policy_id in range(self.cfg.num_policies):
             self.policy_workers[policy_id] = []
 
-            policy_queue = MpQueue()
+            policy_queue = MpQueue(name='policy_queue_{}'.format(policy_id))
             self.policy_queues[policy_id] = policy_queue
 
             for i in range(self.cfg.policy_workers_per_policy):
@@ -495,7 +516,7 @@ class APPO(ReinforcementLearningAlgorithm):
                     delta = report['learner_env_steps'] - self.env_steps[policy_id]
                     self.total_env_steps_since_resume += delta
                 self.env_steps[policy_id] = report['learner_env_steps']
-
+            log.info('policy_avg_stats is {}'.format(self.policy_avg_stats))
             if 'episodic' in report:
                 s = report['episodic']
                 for _, key, value in iterate_recursively(s):
@@ -582,6 +603,7 @@ class APPO(ReinforcementLearningAlgorithm):
                 reward_stats = self.policy_avg_stats['reward'][policy_id]
                 if len(reward_stats) > 0:
                     policy_reward_stats.append((policy_id, f'{np.mean(reward_stats):.3f}'))
+            self.cur_policy_reward = float(policy_reward_stats[0][1])
             log.debug('Avg episode reward: %r', policy_reward_stats)
 
     def report_train_summaries(self, stats, policy_id):
@@ -607,6 +629,8 @@ class APPO(ReinforcementLearningAlgorithm):
 
             if not math.isnan(sample_throughput[policy_id]):
                 self.writers[policy_id].add_scalar('0_aux/_sample_throughput', sample_throughput[policy_id], env_steps)
+
+            self.writers[policy_id].add_scalar('0_aux/_num_rollout_worker', self.num_workers, env_steps)
 
             for key, stat in self.policy_avg_stats.items():
                 if len(stat[policy_id]) >= stat[policy_id].maxlen or (len(stat[policy_id]) > 10 and self.total_train_seconds > 300):
@@ -636,12 +660,66 @@ class APPO(ReinforcementLearningAlgorithm):
     def _should_end_training(self):
         end = len(self.env_steps) > 0 and all(s > self.cfg.train_for_env_steps for s in self.env_steps.values())
         end |= self.total_train_seconds > self.cfg.train_for_seconds
+        end |= self.cfg.stop_value is not None \
+                and self.cur_policy_reward is not None \
+                and self.cur_policy_reward > self.cfg.stop_value
 
         if self.cfg.benchmark:
             end |= self.total_env_steps_since_resume >= int(2e6)
             end |= sum(self.samples_collected) >= int(1e6)
 
         return end
+
+    def free_shared_memory(self):
+        # free shared memory
+        for q in self.actor_queues:
+            q.close()
+        for q in self.policy_queues.values():
+            q.close()
+        self.report_queue.close()
+        self.traj_buffers.close()
+
+    def handler(self, signum, frame):
+        if signum == signal.SIGUSR1:
+            log.info('Receive SIGUSR1! Increase rollout worker to {}.'.format(self.num_workers+1))
+
+            # Add a new actor_worker
+            if self.num_workers < self.cfg.max_num_workers:
+                actor_idx = self.num_workers
+                new_actor_queue = MpQueue(2 * 1000 * 1000, name='actor_queue_{}'.format(actor_idx))
+                self.actor_queues.append(new_actor_queue)
+
+                # Whether have to sync with each worker?
+                for workers in self.policy_workers.values():
+                    for w in workers:
+                        w.increase_actor(actor_idx)
+
+                # init a new actor worker
+                worker_indices = [self.num_workers]
+                self.num_workers += 1
+                worker = self.init_subset(worker_indices, self.actor_queues)
+                self.actor_workers.extend(worker)
+
+        elif signum == signal.SIGUSR2:
+            log.info('Receive SIGUSR2! Decrease rollout worker to {}.'.format(self.num_workers-1))
+            # Add a new actor_worker
+            if self.num_workers >= self.cfg.num_workers:
+                actor_idx = self.num_workers
+
+                w = self.actor_workers.pop()
+                w.close()
+                time.sleep(1)
+                w.join()
+
+                # Whether have to sync with each worker?
+                for workers in self.policy_workers.values():
+                    for w in workers:
+                        w.decrease_actor(actor_idx)
+                time.sleep(0.01)
+
+                q = self.actor_queues.pop()
+                q.close()
+                self.num_workers -= 1
 
     def run(self):
         """
@@ -655,6 +733,10 @@ class APPO(ReinforcementLearningAlgorithm):
         if os.path.isfile(done_filename(self.cfg)):
             log.warning('Training already finished! Remove "done" file to continue training')
             return status
+
+        log.info('Main Process PID is {}'.format(os.getpid()))
+        signal.signal(signal.SIGUSR1, self.handler)
+        signal.signal(signal.SIGUSR2, self.handler)
 
         self.init_workers()
         self.init_pbt()
@@ -724,8 +806,12 @@ class APPO(ReinforcementLearningAlgorithm):
         if self._should_end_training():
             with open(done_filename(self.cfg), 'w') as fobj:
                 fobj.write(f'{self.env_steps}')
+        
+        log.info('Free shared memory...')
+        self.free_shared_memory()
 
         time.sleep(0.5)
         log.info('Done!')
+
 
         return status

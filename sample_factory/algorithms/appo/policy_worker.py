@@ -15,6 +15,12 @@ from sample_factory.algorithms.appo.model import create_actor_critic
 from sample_factory.utils.timing import Timing
 from sample_factory.utils.utils import AttrDict, log, join_or_kill
 
+if os.name == 'nt':
+    from sample_factory.utils import Queue as MpQueue
+else:
+    from faster_fifo import Queue as MpQueue
+    # noinspection PyUnresolvedReferences
+    import faster_fifo_reduction
 
 def dict_of_lists_append(dict_of_lists, new_data, index):
     for key, x in new_data.items():
@@ -66,6 +72,8 @@ class PolicyWorker:
         self.requests = []
 
         self.total_num_samples = 0
+
+        self.num_workers = self.cfg.num_workers
 
         self.process = TorchProcess(target=self._run, daemon=True)
 
@@ -257,6 +265,15 @@ class PolicyWorker:
                         break
                     elif task_type == TaskType.INIT_MODEL:
                         self._init_model(data)
+                    elif task_type == TaskType.INCREASE_ACTOR:
+                        log.info("Increase actor worker {}".format(data))
+                        new_q = MpQueue(name='actor_queue_{}'.format(self.num_workers), create=False)
+                        self.actor_queues.append(new_q)
+                        self.num_workers += 1
+                    elif task_type == TaskType.DECREASE_ACTOR:
+                        log.info("Decrease actor worker {}".format(data))
+                        self.actor_queues.pop()
+                        self.num_workers -= 1
 
                     self.task_queue.task_done()
                 except Empty:
@@ -297,6 +314,12 @@ class PolicyWorker:
 
     def close(self):
         self.task_queue.put((TaskType.TERMINATE, None))
+
+    def increase_actor(self, actor_idx):
+         self.task_queue.put((TaskType.INCREASE_ACTOR, actor_idx))
+    
+    def decrease_actor(self, actor_idx):
+        self.task_queue.put((TaskType.DECREASE_ACTOR, actor_idx))
 
     def join(self):
         join_or_kill(self.process)

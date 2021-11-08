@@ -43,6 +43,7 @@ setup(
         'faster-fifo>=1.2.0',
         'filelock',
         'opencv-python',
+        'easydict'
     ],
 
     package_dir={'': './'},
