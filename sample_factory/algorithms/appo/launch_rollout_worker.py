@@ -5,6 +5,7 @@ import argparse
 import time
 import signal
 from easydict import EasyDict
+import threading
 
 from sample_factory.algorithms.appo.actor_worker import ActorWorker
 from sample_factory.algorithms.appo.appo_utils import make_env_func
@@ -18,14 +19,14 @@ else:
     # noinspection PyUnresolvedReferences
     import faster_fifo_reduction
 
-stop = False
+stop_event = threading.Event()
 
 def my_handler(signum, frame):
-    global stop
-    stop = True
+    global stop_event
+    stop_event.set()
 
 def main():
-    global stop
+    global stop_event
 
     parser = argparse.ArgumentParser(description=r'Launch a rollout worker process.')
 
@@ -66,11 +67,11 @@ def main():
     signal.signal(signal.SIGINT, my_handler)
     signal.signal(signal.SIGTERM, my_handler)
 
+    stop_event.wait()
     while True:
         try:
-            if stop:
-                w.join()
-                break
+            w.join()
+            break
         except Exception as e:
             print(str(e))
             break
