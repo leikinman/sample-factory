@@ -516,7 +516,7 @@ class APPO(ReinforcementLearningAlgorithm):
                     delta = report['learner_env_steps'] - self.env_steps[policy_id]
                     self.total_env_steps_since_resume += delta
                 self.env_steps[policy_id] = report['learner_env_steps']
-            log.info('policy_avg_stats is {}'.format(self.policy_avg_stats))
+
             if 'episodic' in report:
                 s = report['episodic']
                 for _, key, value in iterate_recursively(s):
