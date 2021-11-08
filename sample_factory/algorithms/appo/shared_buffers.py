@@ -178,7 +178,7 @@ class SharedBuffers:
 
         # Configurable excess ratio to be safe
         assert self.cfg.traj_buffers_excess_ratio >= 1.0
-        num_traj_buffers = 3.0 * num_traj_buffers
+        num_traj_buffers = self.cfg.traj_buffers_excess_ratio * num_traj_buffers
 
         num_traj_buffers = int(math.ceil(num_traj_buffers))
 
