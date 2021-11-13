@@ -317,10 +317,10 @@ class PolicyWorker:
         self.task_queue.put((TaskType.TERMINATE, None))
 
     def increase_actor(self):
-         self.task_queue.put((TaskType.INCREASE_ACTOR))
+         self.task_queue.put((TaskType.INCREASE_ACTOR, None))
     
     def decrease_actor(self):
-        self.task_queue.put((TaskType.DECREASE_ACTOR))
+        self.task_queue.put((TaskType.DECREASE_ACTOR, None))
 
     def join(self):
         join_or_kill(self.process)
