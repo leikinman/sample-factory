@@ -78,16 +78,18 @@ TEMP = {
 ROLLOUT_WORKER_CMD = "python -m sample_factory.algorithms.appo.launch_rollout_worker -c=/lustre/{} --worker_idx={}"
 
 
-def _find_main_proc_pod(pod_list, experiment_name):
+def _find_main_proc_pod(pod_list, experiment_name, verbose=True):
     main_proc_pod_name = "{}-main".format(experiment_name)
     pod_names = [pod.metadata.name for pod in pod_list.items]
     if main_proc_pod_name in pod_names:
         idx = pod_names.index(main_proc_pod_name)
         if pod_list.items[idx].status.phase != "Running":
-            log.warning("Please confirm if the experiment {} is running.".format(main_proc_pod_name))
+            if verbose:
+                log.warning("Please confirm if the experiment {} is running.".format(main_proc_pod_name))
             return None
     else:
-        log.warning("Please confirm the experiment {} exists.".format(main_proc_pod_name))
+        if verbose:
+            log.warning("Please confirm the experiment {} exists.".format(main_proc_pod_name))
         return None
     return pod_list.items[idx]
 
@@ -96,8 +98,6 @@ def _get_max_rollout_worker_index_pod(pod_list, experiment_name):
     worker_idx = -1
     for pod in pod_list.items:
         if "{}-rollout-worker-".format(experiment_name) in pod.metadata.name:
-            # if cmd is None:
-            #     cmd = pod.spec.containers[0].args[-1]
             idx = int(pod.metadata.name.split('-')[-1])
             if idx > worker_idx:
                 worker_idx = idx
@@ -140,9 +140,21 @@ def start_exp(run_description, args):
     sched_node_name = main_pod_info.spec.node_name
     log.info('Main Procress is scheduled to {}, so the rest of the workers will be scheduled there ..'.format(sched_node_name))
 
-    log.info('Sleep 5 sec...')
-    time.sleep(5)
-
+    _max_retry = 60
+    _t = 0
+    while True:
+        _t += 1
+        pod_list = k8s_core_v1.list_namespaced_pod(namespace=args.namespace)
+        pod = _find_main_proc_pod(pod_list=pod_list, experiment_name=name, verbose=False)
+        if pod is not None:
+            break
+        elif _t == _max_retry:
+            log.error('There seems to be something wrong with the main process...?')
+            return
+        else:
+            log.info('Sleep 1 sec and wait for the main process to be ready ..')
+            time.sleep(1)
+                
     for idx in range(num_workers):
         body = copy.deepcopy(TEMP)
         cmd = ROLLOUT_WORKER_CMD.format("{}/cfg.json".format(name), idx)
