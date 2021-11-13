@@ -43,8 +43,13 @@ setup(
         'faster-fifo>=1.2.0',
         'filelock',
         'opencv-python',
-        'easydict'
+        'easydict',
     ],
+    extras_require={
+        'k8s': [
+            'kubernetes',
+        ]
+    },
 
     package_dir={'': './'},
     packages=setuptools.find_packages(where='./', include='sample_factory*'),

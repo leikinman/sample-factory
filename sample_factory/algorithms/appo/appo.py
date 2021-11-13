@@ -29,7 +29,8 @@ from torch.multiprocessing import JoinableQueue as TorchJoinableQueue
 from sample_factory.algorithms.algorithm import ReinforcementLearningAlgorithm
 from sample_factory.algorithms.appo.actor_worker import ActorWorker
 from sample_factory.algorithms.appo.fake_actor_worker import FakeActorWorker
-from sample_factory.algorithms.appo.appo_utils import make_env_func, iterate_recursively, set_global_cuda_envvars
+from sample_factory.algorithms.appo.appo_utils import make_env_func, iterate_recursively, set_global_cuda_envvars, \
+    get_shared_memory_name
 from sample_factory.algorithms.appo.learner import LearnerWorker
 from sample_factory.algorithms.appo.policy_worker import PolicyWorker
 from sample_factory.algorithms.appo.population_based_training import PopulationBasedTraining
@@ -238,6 +239,8 @@ class APPO(ReinforcementLearningAlgorithm):
         p.add_argument('--benchmark', default=False, type=str2bool, help='Benchmark mode')
         p.add_argument('--sampler_only', default=False, type=str2bool, help='Do not send experience to the learner, measuring sampling throughput')
 
+        p.add_argument('--platform', default='local', type=str, choices=['local', 'k8s'], help='the platform to run')
+
     def __init__(self, cfg):
         super().__init__(cfg)
 
@@ -265,7 +268,7 @@ class APPO(ReinforcementLearningAlgorithm):
 
         self.actor_workers = None
 
-        self.report_queue = MpQueue(40 * 1000 * 1000, name="report_queue")
+        self.report_queue = MpQueue(40 * 1000 * 1000, name=get_shared_memory_name(self.cfg, "report_queue"))
         self.policy_workers = dict()
         self.policy_queues = dict()
 
@@ -432,7 +435,7 @@ class APPO(ReinforcementLearningAlgorithm):
         """
         actor_queues = []
         for i in range(self.cfg.num_workers):
-            actor_queues.append(MpQueue(2 * 1000 * 1000, name='actor_queue_{}'.format(i)) )
+            actor_queues.append(MpQueue(2 * 1000 * 1000, name=get_shared_memory_name(self.cfg, 'actor_queue_{}'.format(i))) )
         self.actor_queues = actor_queues
 
         policy_worker_queues = dict()
@@ -462,7 +465,7 @@ class APPO(ReinforcementLearningAlgorithm):
         for policy_id in range(self.cfg.num_policies):
             self.policy_workers[policy_id] = []
 
-            policy_queue = MpQueue(name='policy_queue_{}'.format(policy_id))
+            policy_queue = MpQueue(name=get_shared_memory_name(self.cfg, 'policy_queue_{}'.format(policy_id)))
             self.policy_queues[policy_id] = policy_queue
 
             for i in range(self.cfg.policy_workers_per_policy):
@@ -681,18 +684,19 @@ class APPO(ReinforcementLearningAlgorithm):
 
     def handler(self, signum, frame):
         if signum == signal.SIGUSR1:
-            log.info('Receive SIGUSR1! Increase rollout worker to {}.'.format(self.num_workers+1))
+            log.info('Receive SIGUSR1! Increase th number of rollout workers to {}.'.format(self.num_workers+1))
 
             # Add a new actor_worker
             if self.num_workers < self.cfg.max_num_workers:
                 actor_idx = self.num_workers
-                new_actor_queue = MpQueue(2 * 1000 * 1000, name='actor_queue_{}'.format(actor_idx))
+                new_actor_queue = MpQueue(2 * 1000 * 1000, 
+                    name=get_shared_memory_name(self.cfg, 'actor_queue_{}'.format(actor_idx)) )
                 self.actor_queues.append(new_actor_queue)
 
                 # Whether have to sync with each worker?
                 for workers in self.policy_workers.values():
                     for w in workers:
-                        w.increase_actor(actor_idx)
+                        w.increase_actor()
 
                 # init a new actor worker
                 worker_indices = [self.num_workers]
@@ -701,11 +705,9 @@ class APPO(ReinforcementLearningAlgorithm):
                 self.actor_workers.extend(worker)
 
         elif signum == signal.SIGUSR2:
-            log.info('Receive SIGUSR2! Decrease rollout worker to {}.'.format(self.num_workers-1))
+            log.info('Receive SIGUSR2! Decrease the number of rollout workers to {}.'.format(self.num_workers-1))
             # Add a new actor_worker
             if self.num_workers >= self.cfg.num_workers:
-                actor_idx = self.num_workers
-
                 w = self.actor_workers.pop()
                 w.close()
                 time.sleep(1)
@@ -714,7 +716,7 @@ class APPO(ReinforcementLearningAlgorithm):
                 # Whether have to sync with each worker?
                 for workers in self.policy_workers.values():
                     for w in workers:
-                        w.decrease_actor(actor_idx)
+                        w.decrease_actor()
                 time.sleep(0.01)
 
                 q = self.actor_queues.pop()

@@ -22,7 +22,7 @@ else:
     from faster_fifo import Queue as MpQueue
 
 from sample_factory.algorithms.appo.appo_utils import TaskType, list_of_dicts_to_dict_of_lists, memory_stats, cuda_envvars_for_policy, \
-    TensorBatcher, iter_dicts_recursively, copy_dict_structure, ObjectPool
+    TensorBatcher, iter_dicts_recursively, copy_dict_structure, ObjectPool, get_shared_memory_name
 from sample_factory.algorithms.appo.model import create_actor_critic
 from sample_factory.algorithms.appo.aux_losses import CPCA
 from sample_factory.algorithms.appo.population_based_training import PbtTask
@@ -221,7 +221,7 @@ class LearnerWorker:
         self.policy_lock = policy_lock
         self.resume_experience_collection_cv = resume_experience_collection_cv
 
-        self.task_queue = MpQueue(name='learner_worker_task_queue_{}'.format(worker_idx))
+        self.task_queue = MpQueue(name=get_shared_memory_name(cfg, 'learner_worker_task_queue_{}'.format(worker_idx)) )
         self.report_queue = report_queue
 
         self.initialized_event = MultiprocessingEvent()

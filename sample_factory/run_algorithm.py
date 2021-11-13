@@ -1,7 +1,13 @@
 import sys
+import signal
 
 from sample_factory.algorithms.utils.arguments import maybe_load_from_checkpoint, get_algo_class, parse_args
 
+def handler():
+    raise KeyboardInterrupt
+
+signal.signal(signal.SIGINT, handler)
+signal.signal(signal.SIGTERM, handler)
 
 def run_algorithm(cfg):
     cfg = maybe_load_from_checkpoint(cfg)

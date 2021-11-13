@@ -34,6 +34,9 @@ class DictObservationsWrapper(Wrapper):
         obs, rew, done, info = self.env.step(action)
         return [dict(obs=o) for o in obs], rew, done, info
 
+def get_shared_memory_name(cfg, name):
+    return "samplefactory.shm.{}.{}".format(cfg.experiment, name)
+    
 
 def make_env_func(cfg, env_config):
     env = create_env(cfg.env, cfg=cfg, env_config=env_config)

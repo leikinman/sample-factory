@@ -10,7 +10,7 @@ import psutil
 import torch
 from torch.multiprocessing import Process as TorchProcess
 
-from sample_factory.algorithms.appo.appo_utils import TaskType, memory_stats, cuda_envvars_for_policy
+from sample_factory.algorithms.appo.appo_utils import TaskType, memory_stats, cuda_envvars_for_policy, get_shared_memory_name
 from sample_factory.algorithms.appo.model import create_actor_critic
 from sample_factory.utils.timing import Timing
 from sample_factory.utils.utils import AttrDict, log, join_or_kill
@@ -266,12 +266,13 @@ class PolicyWorker:
                     elif task_type == TaskType.INIT_MODEL:
                         self._init_model(data)
                     elif task_type == TaskType.INCREASE_ACTOR:
-                        log.info("Increase actor worker {}".format(data))
-                        new_q = MpQueue(name='actor_queue_{}'.format(self.num_workers), create=False)
+                        new_q = MpQueue(
+                            name=get_shared_memory_name(self.cfg, 'actor_queue_{}'.format(self.num_workers)), 
+                            create=False
+                            )
                         self.actor_queues.append(new_q)
                         self.num_workers += 1
                     elif task_type == TaskType.DECREASE_ACTOR:
-                        log.info("Decrease actor worker {}".format(data))
                         self.actor_queues.pop()
                         self.num_workers -= 1
 
@@ -315,11 +316,11 @@ class PolicyWorker:
     def close(self):
         self.task_queue.put((TaskType.TERMINATE, None))
 
-    def increase_actor(self, actor_idx):
-         self.task_queue.put((TaskType.INCREASE_ACTOR, actor_idx))
+    def increase_actor(self):
+         self.task_queue.put((TaskType.INCREASE_ACTOR))
     
-    def decrease_actor(self, actor_idx):
-        self.task_queue.put((TaskType.DECREASE_ACTOR, actor_idx))
+    def decrease_actor(self):
+        self.task_queue.put((TaskType.DECREASE_ACTOR))
 
     def join(self):
         join_or_kill(self.process)

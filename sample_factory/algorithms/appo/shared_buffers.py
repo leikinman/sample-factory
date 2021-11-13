@@ -7,7 +7,8 @@ import numpy as np
 import torch
 from gym import spaces
 
-from sample_factory.algorithms.appo.appo_utils import copy_dict_structure, iter_dicts_recursively, iterate_recursively
+from sample_factory.algorithms.appo.appo_utils import copy_dict_structure, iter_dicts_recursively, iterate_recursively, \
+    get_shared_memory_name
 from sample_factory.algorithms.appo.model_utils import get_hidden_size
 from sample_factory.algorithms.utils.action_distributions import calc_num_logits, calc_num_actions
 from sample_factory.utils.utils import log
@@ -144,11 +145,15 @@ class SharedBuffers:
 
         queue_max_size_bytes = self.num_traj_buffers * 40  # 40 bytes to encode an int should be enough?
         if self.create == True:
-            self.free_buffers_queue = faster_fifo.Queue(max_size_bytes=queue_max_size_bytes, name='free_buffer_queue', create=True)
+            self.free_buffers_queue = faster_fifo.Queue(max_size_bytes=queue_max_size_bytes, 
+                name=get_shared_memory_name(self.cfg, 'free_buffer_queue'), 
+                create=True)
             # since all buffers are initially free, we add all buffer indices to the queue
             self.free_buffers_queue.put_many_nowait([int(i) for i in np.arange(self.num_traj_buffers)])
         else:
-            self.free_buffers_queue = faster_fifo.Queue(name='free_buffer_queue', create=False)
+            self.free_buffers_queue = faster_fifo.Queue(
+                name=get_shared_memory_name(self.cfg, 'free_buffer_queue'), 
+                create=False)
 
 
     def calc_num_trajectory_buffers(self):
@@ -189,7 +194,7 @@ class SharedBuffers:
         if not isinstance(tensor_type, np.dtype):
             tensor_type = np.dtype(tensor_type)
 
-        name = "shared_buffers_{}".format(self._shm_alloc_inc)
+        name = get_shared_memory_name(self.cfg, "shared_buffers_{}".format(self._shm_alloc_inc))
         dimensions = [self.num_traj_buffers, self.cfg.rollout]
         final_shape = list(tensor_shape)
         if with_dim:

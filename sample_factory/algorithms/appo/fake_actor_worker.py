@@ -1,8 +1,8 @@
+import sys
 import time
 import subprocess
 from sample_factory.utils.utils import log
 from sample_factory.algorithms.appo.appo_utils import TaskType
-import sys
 
 class FakeActorWorker:
 
@@ -36,13 +36,21 @@ class FakeActorWorker:
         self.task_queue = task_queue
 
         self.reward_shaping = [None for _ in range(self.cfg.num_policies)]
+        
+        
+        if cfg.platform == "local":
+            exec_cmd = [sys.executable,
+                        '-m', 'sample_factory.algorithms.appo.launch_rollout_worker', 
+                        '-c', '{}/{}/cfg.json'.format(cfg.train_dir, cfg.experiment), 
+                        '--worker_id', '{}'.format(self.worker_idx)
+                        ]
+            self.process = subprocess.Popen(exec_cmd)
+        elif cfg.platform == "k8s":
+            # Do nothing
+            pass
+        else:
+            raise NotImplementedError
 
-        exec_cmd = [sys.executable,
-                    '-m', 'sample_factory.algorithms.appo.launch_rollout_worker',
-                    '-c', '{}/{}/cfg.json'.format(cfg.train_dir, cfg.experiment),
-                    '--worker_id', '{}'.format(self.worker_idx)
-                    ]
-        self.process = subprocess.Popen(exec_cmd)
 
     def init(self):
         self.task_queue.put((TaskType.INIT, None))
@@ -57,7 +65,10 @@ class FakeActorWorker:
     def close(self):
         self.task_queue.put((TaskType.TERMINATE, None))
         # TODO: For Test
-        self.process.terminate()
+        if self.cfg.platform == "local":
+            self.process.terminate()
+        elif self.cfg.platform == "k8s":
+            pass
 
     def update_env_steps(self, env_steps):
         try:
@@ -67,16 +78,21 @@ class FakeActorWorker:
 
     def join(self):
         timeout = 1.0
-        try:
-            self.process.wait(timeout)
-        except subprocess.TimeoutExpired:
-            if self.process_is_alive():
-                log.warning('Process %r could not join, kill it with fire!', self.process)
-                self.process.kill()
-                log.warning('Process %r is dead (%r)', self.process, self.process_is_alive())            
+        if self.cfg.platform == "local":
+            try:
+                self.process.wait(timeout)
+            except subprocess.TimeoutExpired:
+                if self.process_is_alive():
+                    log.warning('Process %r could not join, kill it with fire!', self.process)
+                    self.process.kill()
+                    log.warning('Process %r is dead (%r)', self.process, self.process_is_alive())            
 
     def process_is_alive(self):
-        return self.process.poll() is None
+        if self.cfg.platform == "local":
+            return self.process.poll() is None
+        else:
+            return True
     
     def kill(self):
-        self.process.kill()
+        if self.cfg.platform == "local":
+            self.process.kill()
